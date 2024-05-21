@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Supermarket and Office Finder</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1, user-scalable=no">
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.3.1/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.3.1/mapbox-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+        .panel {
+            background-color: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            z-index: 1;
+        }
+        #controls-top {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+        }
+        #controls-bottom {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+        }
+        #controls-right {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+        }
+        #info {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+        }
+        #controls-top button, #controls-bottom button, #controls-right button {
+            display: block;
+            margin-bottom: 5px;
+            padding: 5px 10px;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+            background-color: #008CBA;
+            color: white;
+            transition: transform 0.2s;
+        }
+        .marker-label {
+            background-color: rgba(255, 255, 255, 0.8);
+            border-radius: 3px;
+            padding: 3px 6px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #333;
+            border: 1px solid #ccc;
+        }
+        .white-frame {
+            border: 2px solid rgba(255, 255, 255, 0.8);
+        }
+        .red-frame {
+            border: 2px solid rgba(255, 0, 0, 0.8);
+        }
+        .green-frame {
+            border: 2px solid rgba(0, 128, 0, 0.8);
+        }
+        .clicked {
+            transform: scale(0.9);
+        }
+        #search-input {
+            width: 200px;
+            padding: 5px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+        #legend {
+            position: absolute;
+            bottom: 40px;
+            right: 10px;
+            padding: 10px;
+            background-color: gray;
+            z-index: 1;
+            width: 150px;
+            height: 180px;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 5px;
+        }
+    </style>
+</head>
+<body>
+<div id="legend" class="panel">
+    <h3>Legend</h3>
+    <div><span class="legend-color red-frame"></span>Offices</div>
+    <br>
+    <div><span class="legend-color white-frame"></span>Supermarkets</div>
+    <br>
+    <div><span class="legend-color green-frame"></span>Cafes</div>
+</div>
+<div id="controls-top" class="panel">
+    <button id="walking-btn" onclick="animateButton(this); setTravelMode('walking'); refreshMap()">Walking</button>
+    <button id="cycling-btn" onclick="animateButton(this); setTravelMode('cycling'); refreshMap()">Cycling</button>
+</div>
+<div id="controls-bottom" class="panel">
+    <button onclick="animateButton(this); locateUser()">Locate Me</button>
+    <input type="text" id="search-input" placeholder="Search location" list="suggestions">
+    <datalist id="suggestions"></datalist>
+    <button onclick="animateButton(this); searchLocation()">Search</button>
+</div>
+<div id="controls-right" class="panel">
+    <button id="supermarkets-btn" onclick="animateButton(this); setViewMode('supermarkets'); refreshMap()">Supermarkets Only</button>
+    <button id="offices-btn" onclick="animateButton(this); setViewMode('offices'); refreshMap()">Offices Only</button>
+    <button id="cafes-btn" onclick="animateButton(this); setViewMode('cafes'); refreshMap()">Cafes Only</button>
+    <button id="both-btn" onclick="animateButton(this); setViewMode('both'); refreshMap()">All</button>
+</div>
+<div id="info">Click on the map to show the 15-min zone</div>
+<div id="map"></div>
+<script>
+    
+    mapboxgl.accessToken = 'pk.eyJ1Ijoic3VjY3p6ejMzIiwiYSI6ImNscjdyNzNoMzBzazAya3Bxamh3ZHpzbmcifQ.347krqDQa8EZAWoKQ7hcqw';
+    var map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/dark-v11',
+        center: [-0.1, 51.5],
+        zoom: 12
+    });
+
+    let markers = [];
+    let centerMarker = null;
+    let travelMode = 'walking';
+    let viewMode = 'both';
+    let lastLngLat = {lng: -0.1, lat: 51.5};
+
+    function clearMarkers() {
+        markers.forEach(marker => marker.remove());
+        markers = [];
+    }
+
+    function animateButton(button) {
+        button.classList.add('clicked');
+        setTimeout(() => button.classList.remove('clicked'), 200);
+    }
+
+    function setTravelMode(mode) {
+        travelMode = mode;
+    }
+
+    function setViewMode(mode) {
+        viewMode = mode;
+        refreshMap();
+    }
+
+    async function getIsochrone(lng, lat) {
+        const url = `https://api.mapbox.com/isochrone/v1/mapbox/${travelMode}/${lng},${lat}?contours_minutes=15&polygons=true&access_token=${mapboxgl.accessToken}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        return data.features[0];
+    }
+
+    function showIsochrone(map, features) {
+        if (map.getSource('isochrone')) {
+            map.getSource('isochrone').setData(features);
+        } else {
+            map.addSource('isochrone', {
+                type: 'geojson',
+                data: features
+            });
+            map.addLayer({
+                id: 'isochrone-layer',
+                type: 'fill',
+                source: 'isochrone',
+                paint: {
+                    'fill-color': '#ffcccc',
+                    'fill-opacity': 0.5
+                }
+            });
+        }
+    }
+
+    async function getSupermarketsByType(lng, lat, type) {
+        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${type}.json?proximity=${lng},${lat}&limit=50&access_token=${mapboxgl.accessToken}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        return data.features;
+    }
+
+    async function getAllSupermarkets(lng, lat) {
+        const types = ['supermarket', 'grocery', 'store', 'convenience', 'shop', 'Aldi', 'M&S', 'Co-op', 'Tesco', 'Sainsbury', 'Lidl', 'Asda', 'Morrisons', 'Waitrose', 'Iceland', 'ALDI'];
+        let allSupermarkets = [];
+
+        for (const type of types) {
+            const supermarkets = await getSupermarketsByType(lng, lat, type);
+            allSupermarkets = allSupermarkets.concat(supermarkets);
+        }
+
+        return allSupermarkets;
+    }
+
+    async function getOffices(lng, lat) {
+        const keywords = ['wework', 'The Office Group', 'Regus', 'Spaces'];
+        let allOffices = [];
+
+        for (const keyword of keywords) {
+            const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${keyword}.json?proximity=${lng},${lat}&limit=50&access_token=${mapboxgl.accessToken}`;
+            const response = await fetch(url);
+            const data = await response.json();
+            allOffices = allOffices.concat(data.features);
+        }
+
+        return allOffices;
+    }
+
+    async function getCafes(lng, lat) {
+        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/cafe.json?proximity=${lng},${lat}&limit=50&access_token=${mapboxgl.accessToken}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        return data.features;
+    }
+
+    function isPointInPolygon(point, polygon) {
+        return turf.booleanPointInPolygon(point, polygon);
+    }
+
+    async function findSupermarketsAndOfficesInIsochrone(lng, lat) {
+        const isochronePolygon = await getIsochrone(lng, lat);
+        showIsochrone(map, isochronePolygon);
+
+        const supermarkets = await getAllSupermarkets(lng, lat);
+        const offices = await getOffices(lng, lat);
+        const cafes = await getCafes(lng, lat);
+
+        return {
+            supermarkets: supermarkets.filter(store => isPointInPolygon(store.geometry, isochronePolygon)),
+            offices: offices.filter(office => isPointInPolygon(office.geometry, isochronePolygon)),
+            cafes: cafes.filter(cafe => isPointInPolygon(cafe.geometry, isochronePolygon))
+        };
+    }
+
+    map.on('load', function() {
+    
+    const defaultCenter = [-0.1, 51.5]; 
+
+    
+    centerMarker = new mapboxgl.Marker({ color: 'blue' })
+        .setLngLat(defaultCenter)
+        .addTo(map);
+
+   
+    displaySupermarketsAndOffices(defaultCenter[0], defaultCenter[1]);
+});
+
+    async function displaySupermarketsAndOffices(lng, lat) {
+        clearMarkers();
+        lastLngLat = {lng, lat};
+        const { supermarkets, offices, cafes } = await findSupermarketsAndOfficesInIsochrone(lng, lat);
+
+        if (viewMode === 'supermarkets' || viewMode === 'both') {
+            supermarkets.forEach(function(store) {
+                const el = document.createElement('div');
+                el.className = 'marker-label white-frame';
+                el.textContent = store.text;
+
+                const marker = new mapboxgl.Marker(el)
+                    .setLngLat(store.geometry.coordinates)
+                    .addTo(map);
+                markers.push(marker);
+            });
+        }
+
+        if (viewMode === 'offices' || viewMode === 'both') {
+            offices.forEach(function(office) {
+                const el = document.createElement('div');
+                el.className = 'marker-label red-frame';
+                el.textContent = office.text;
+
+                const marker = new mapboxgl.Marker(el)
+                    .setLngLat(office.geometry.coordinates)
+                    .addTo(map);
+                markers.push(marker);
+            });
+        }
+
+        if (viewMode === 'cafes' || viewMode === 'both') {
+            cafes.forEach(function(cafe) {
+                const el = document.createElement('div');
+                el.className = 'marker-label green-frame';
+                el.textContent = cafe.text;
+
+                const marker = new mapboxgl.Marker(el)
+                    .setLngLat(cafe.geometry.coordinates)
+                    .addTo(map);
+                markers.push(marker);
+            });
+        }
+    }
+
+    function refreshMap() {
+        displaySupermarketsAndOffices(lastLngLat.lng, lastLngLat.lat);
+    }
+
+    map.on('click', async function(e) {
+        const lngLat = e.lngLat;
+
+        if (centerMarker) centerMarker.remove();
+
+        centerMarker = new mapboxgl.Marker({ color: 'blue' })
+            .setLngLat(lngLat)
+            .addTo(map);
+
+        displaySupermarketsAndOffices(lngLat.lng, lngLat.lat);
+    });
+
+    map.on('mousemove', 'place-label', (e) => {
+        // Prevents the popup from appearing immediately
+        if (window.hoverTimeout) {
+            clearTimeout(window.hoverTimeout);
+        }
+
+        window.hoverTimeout = setTimeout(() => {
+            if (e.features.length > 0) {
+                const feature = e.features[0];
+
+                // Create a popup and set its contents to the name of the place
+                const popup = new mapboxgl.Popup({ closeOnClick: false, offset: 25 })
+                    .setLngLat(e.lngLat)
+                    .setHTML(`<h4>${feature.text}</h4>`) // Assuming 'text' is the field with the name
+                    .addTo(map);
+            }
+        }, 1000); // 1000 milliseconds delay
+    });
+
+    map.on('mouseleave', 'place-label', () => {
+        if (window.hoverTimeout) {
+            clearTimeout(window.hoverTimeout);
+        }
+        // Remove the popup when the mouse leaves the feature
+        if (map.getPopup()) {
+            map.getPopup().remove();
+        }
+    });
+
+    async function locateUser() {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(async position => {
+                const { latitude, longitude } = position.coords;
+                map.flyTo({ center: [longitude, latitude], zoom: 14 });
+
+                if (centerMarker) centerMarker.remove();
+                centerMarker = new mapboxgl.Marker({ color: 'blue' })
+                    .setLngLat([longitude, latitude])
+                    .addTo(map);
+
+                displaySupermarketsAndOffices(longitude, latitude);
+            }, error => {
+                alert('Error: Unable to retrieve your location');
+            });
+        } else {
+            alert('Error: Geolocation is not supported by this browser');
+        }
+    }
+
+    async function searchLocation() {
+        const input = document.getElementById('search-input').value;
+        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(input)}.json?access_token=${mapboxgl.accessToken}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        if (data.features.length > 0) {
+            const location = data.features[0].center;
+            map.flyTo({ center: location, zoom: 14 });
+
+            if (centerMarker) centerMarker.remove();
+            centerMarker = new mapboxgl.Marker({ color: 'blue' })
+                .setLngLat(location)
+                .addTo(map);
+
+            displaySupermarketsAndOffices(location[0], location[1]);
+        } else {
+            alert('No results found for the location');
+        }
+    }
+
+    document.getElementById('search-input').addEventListener('input', async function() {
+        const input = document.getElementById('search-input').value;
+        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(input)}.json?autocomplete=true&access_token=${mapboxgl.accessToken}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        const suggestions = document.getElementById('suggestions');
+        suggestions.innerHTML = '';
+        data.features.forEach(feature => {
+            const option = document.createElement('option');
+            option.value = feature.place_name;
+            suggestions.appendChild(option);
+        });
+    });
+</script>
+</body>
+</html>
